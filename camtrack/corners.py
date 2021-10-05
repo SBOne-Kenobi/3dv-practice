@@ -47,17 +47,50 @@ class _CornerStorageBuilder:
 
 
 _QUALITY = 0.05
-_MIN_DIST = 6
+_MIN_DIST = 15
 _CORNER_SIZE = 10
 _PYR_SIZE = 3
 _WINDOW_SIZE = _CORNER_SIZE * (2 ** _PYR_SIZE)
 
 
+def configure(shape):
+    global _CORNER_SIZE
+    global _MIN_DIST
+    global _WINDOW_SIZE
+    shape = min(shape[0], shape[1])
+
+    r = _MIN_DIST / _CORNER_SIZE
+    _CORNER_SIZE = _CORNER_SIZE * shape // 1000
+    _MIN_DIST = int(r * _CORNER_SIZE)
+    _WINDOW_SIZE = _CORNER_SIZE * (2 ** _PYR_SIZE)
+
+
 def _detect_corners_pyr(image, ids, corners, sizes):
     mask = np.full_like(image, 255, dtype='uint8')
     if corners is not None:
-        for corner, size in zip(corners, sizes):
-            cv2.circle(mask, corner, int(_MIN_DIST * size[0] / _CORNER_SIZE), 0, -1)
+        order = sorted(range(len(ids)), key=lambda x: sizes[x][0])
+        cur_corners = corners
+        cur_sizes = sizes
+        cur_ids = ids
+
+        corners = []
+        sizes = []
+        ids = []
+
+        for i in order:
+            corner = cur_corners[i].astype(int)
+            if corner[1] < 0 or corner[1] >= mask.shape[0] or corner[0] < 0 or corner[0] >= mask.shape[1]:
+                continue
+            if mask[corner[1], corner[0]] == 0:
+                continue
+            cv2.circle(mask, corner, int(_MIN_DIST * cur_sizes[i][0] / _CORNER_SIZE), 0, -1)
+            corners.append(cur_corners[i])
+            sizes.append(cur_sizes[i][0])
+            ids.append(cur_ids[i][0])
+
+        corners = np.array(corners).reshape([-1, 2])
+        sizes = np.array(sizes).reshape([-1, 1])
+        ids = np.array(ids).reshape([-1, 1])
 
     orig_size = image.shape[0]
 
@@ -75,7 +108,7 @@ def _detect_corners_pyr(image, ids, corners, sizes):
             blockSize=_CORNER_SIZE
         )
         if cur_corners is not None:
-            cur_corners = (cur_corners * orig_size / cur_img.shape[0]).astype(int)
+            cur_corners = cur_corners * orig_size / cur_img.shape[0]
             cur_size = int(_CORNER_SIZE * orig_size / cur_img.shape[0])
 
             ext_corners.extend(zip(cur_corners, [cur_size] * len(cur_corners), cur_quality))
@@ -92,9 +125,9 @@ def _detect_corners_pyr(image, ids, corners, sizes):
 
     for corner, size, _ in sorted_ext:
         corner = corner[0]
-        if mask[corner[1], corner[0]] == 0:
+        if mask[int(corner[1]), int(corner[0])] == 0:
             continue
-        cv2.circle(mask, corner, int(_MIN_DIST * size / _CORNER_SIZE), 0, -1)
+        cv2.circle(mask, corner.astype(int), int(_MIN_DIST * size / _CORNER_SIZE), 0, -1)
         ext_ids.append(next_id)
         ext_corners.append(corner)
         ext_sizes.append(size)
@@ -131,7 +164,7 @@ def _detect_flow(image0, image1, ids, corners, sizes):
     st = st.flatten() == 1
 
     ids = ids[st]
-    next_corners = next_corners[st].astype(int)
+    next_corners = next_corners[st]
     sizes = sizes[st]
 
     if len(ids) == 0:
@@ -142,15 +175,15 @@ def _detect_flow(image0, image1, ids, corners, sizes):
 
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
-    ids = None
-    corners = None
-    sizes = None
+    configure(frame_sequence[0].shape)
+    ids, corners, sizes = _detect_corners_pyr(frame_sequence[0], None, None, None)
+
     for frame, image in enumerate(frame_sequence):
         if frame > 0:
             ids, corners, sizes = _detect_flow(frame_sequence[frame - 1], image, ids, corners, sizes)
         ids, corners, sizes = _detect_corners_pyr(image, ids, corners, sizes)
 
-        builder.set_corners_at_frame(frame, FrameCorners(ids, corners, sizes))
+        builder.set_corners_at_frame(frame, FrameCorners(ids, corners.astype(int), sizes))
 
 
 def build(frame_sequence: pims.FramesSequence,
