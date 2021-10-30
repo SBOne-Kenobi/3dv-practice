@@ -183,7 +183,7 @@ def _build_impl(frame_sequence: pims.FramesSequence,
             ids, corners, sizes = _detect_flow(frame_sequence[frame - 1], image, ids, corners, sizes)
         ids, corners, sizes = _detect_corners_pyr(image, ids, corners, sizes)
 
-        builder.set_corners_at_frame(frame, FrameCorners(ids, corners.astype(int), sizes))
+        builder.set_corners_at_frame(frame, FrameCorners(ids.astype('int64'), corners, sizes))
 
 
 def build(frame_sequence: pims.FramesSequence,
