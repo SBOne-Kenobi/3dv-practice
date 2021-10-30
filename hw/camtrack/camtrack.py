@@ -144,6 +144,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
 
     update_range(frame1)
     update_range(frame2)
+    print('Initialize:')
 
     while True:
         # triangulation
@@ -171,6 +172,8 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                 intrinsic_mat, triangulate_params
             )
         point_cloud_builder.add_points(best_corr_ids, best_points3d)
+        print(f'\tTriangulated {len(best_points3d)} points')
+        print(f'\tCloud size: {len(point_cloud_builder.ids)}')
 
         # calculate motion
         best_frame = -1
@@ -197,6 +200,8 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         update_range(best_frame)
         frame1 = best_frame
         frame2 = None
+        print(f'Frame {frame1}:')
+        print(f'\tInliers: {best_frame_inliers_count}')
 
     calc_point_cloud_colors(
         point_cloud_builder,
