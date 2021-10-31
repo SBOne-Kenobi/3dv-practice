@@ -18,3 +18,7 @@
 
 # Dataset
 **/dataset/
+
+# Tests
+**/output/
+**/corners_dir/

@@ -25,7 +25,6 @@ from _camtrack import (
     rodrigues_and_translation_to_view_mat3x4,
     check_inliers_mask,
     check_baseline,
-    compute_reprojection_errors
 )
 from corners import CornerStorage, FrameCorners
 from data3d import CameraParameters, PointCloud, Pose
@@ -119,7 +118,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         min_inlier_ratio=0.3,
     )
     base_line_min_dist = 0
-    max_frame_distance = 4
+    max_frame_distance = 20
 
     frame1 = known_view_1[0]
     frame2 = known_view_2[0]
