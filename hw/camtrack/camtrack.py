@@ -25,6 +25,8 @@ from _camtrack import (
     rodrigues_and_translation_to_view_mat3x4,
     check_inliers_mask,
     check_baseline,
+    Correspondences,
+    eye3x4
 )
 from corners import CornerStorage, FrameCorners
 from data3d import CameraParameters, PointCloud, Pose
@@ -84,15 +86,125 @@ def _find_view_mat_pnp(cloud: PointCloudBuilder,
     ), ids[~inliers_mask], len(inliers)
 
 
+InitViewsParameters = namedtuple(
+    'InitViewsParameters',
+    ('inliers_prob', 'max_distance_to_epipolar_line',
+     'outliers_ratio', 'triangulate_params',
+     'max_frame_distance', 'max_reprojection_error',
+     'min_inlier_count', 'min_inlier_ratio')
+)
+
+
+def find_view_mat(correspondences: Correspondences,
+                  intrinsic_mat: np.ndarray,
+                  params: InitViewsParameters) \
+        -> Tuple[Optional[np.ndarray], Optional[float], Optional[int], Optional[float]]:
+    if len(correspondences.ids) < 5:
+        return None, None, None, None
+
+    iterations_e_mat = int(np.ceil(np.log(1.0 - params.inliers_prob) / np.log(1.0 - (1.0 - params.outliers_ratio) ** 5)))
+
+    e_mat, inliers = cv2.findEssentialMat(
+        correspondences.points_1,
+        correspondences.points_2,
+        intrinsic_mat,
+        cv2.RANSAC,
+        params.inliers_prob,
+        params.max_distance_to_epipolar_line,
+        iterations_e_mat
+    )
+
+    iterations_hom = int(np.ceil(np.log(1.0 - params.inliers_prob) / np.log(params.outliers_ratio)))
+
+    _, inliers_hom = cv2.findHomography(
+        correspondences.points_1,
+        correspondences.points_2,
+        cv2.RANSAC,
+        params.max_reprojection_error,
+        maxIters=iterations_hom
+    )
+
+    inliers = inliers.flatten()
+    inliers_hom = inliers_hom.flatten()
+
+    if not check_inliers_mask(inliers, params.min_inlier_count, params.min_inlier_ratio):
+        return None, None, None, None
+
+    correspondences = Correspondences(
+        correspondences.ids[inliers],
+        correspondences.points_1[inliers],
+        correspondences.points_2[inliers]
+    )
+
+    r_1, r_2, _t = cv2.decomposeEssentialMat(e_mat)
+    best_view_mat = None
+    best_point_count = None
+    best_med_cos = None
+    for R in [r_1, r_2]:
+        for t in [-_t, _t]:
+            view_mat = np.hstack([R, t.reshape(-1, 1)])
+            points3d, corr_ids, med_cos = triangulate_correspondences(
+                correspondences, eye3x4(), view_mat,
+                intrinsic_mat, params.triangulate_params
+            )
+
+            point_count = len(corr_ids)
+
+            if best_view_mat is None or point_count > best_point_count:
+                best_view_mat = view_mat
+                best_point_count = point_count
+                best_med_cos = med_cos
+
+    return best_view_mat, best_med_cos, best_point_count, np.sum(inliers_hom) / np.sum(inliers)
+
+
+def _init_views_impl(intrinsic_mat, corner_storage, params, min_point_count, max_hom_ratio):
+    for ln in range(params.max_frame_distance, 0, -1):
+        for i in range(len(corner_storage) - ln):
+            j = i + ln
+            view_mat, med_cos, point_count, hom_ratio = find_view_mat(
+                build_correspondences(
+                    corner_storage[i],
+                    corner_storage[j]
+                ), intrinsic_mat, params)
+            if view_mat is None:
+                continue
+            if point_count < min_point_count:
+                continue
+            if hom_ratio > max_hom_ratio:
+                continue
+            return (
+                (i, view_mat3x4_to_pose(eye3x4())),
+                (j, view_mat3x4_to_pose(view_mat))
+            )
+    return None
+
+
+def init_views(intrinsic_mat: np.ndarray,
+               corner_storage: CornerStorage,
+               params: InitViewsParameters) \
+        -> Tuple[Tuple[int, Pose], Tuple[int, Pose]]:
+    max_hom_ratio = 0.2
+    while max_hom_ratio <= 1.0:
+        min_point_count = 200
+        while min_point_count > 20:
+            res = _init_views_impl(
+                intrinsic_mat, corner_storage,
+                params, min_point_count, max_hom_ratio
+            )
+            if res is not None:
+                return res
+            min_point_count //= 2
+        max_hom_ratio *= 2.0
+    raise RuntimeError("Not found initial views")
+
+
 def track_and_calc_colors(camera_parameters: CameraParameters,
                           corner_storage: CornerStorage,
                           frame_sequence_path: str,
                           known_view_1: Optional[Tuple[int, Pose]] = None,
                           known_view_2: Optional[Tuple[int, Pose]] = None) \
         -> Tuple[List[Pose], PointCloud]:
-    if known_view_1 is None or known_view_2 is None:
-        raise NotImplementedError()
-
     rgb_sequence = frameseq.read_rgb_f32(frame_sequence_path)
     intrinsic_mat = to_opencv_camera_mat3x3(
         camera_parameters,
@@ -118,7 +230,25 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         min_inlier_ratio=0.3,
     )
     base_line_min_dist = 0
-    max_frame_distance = 20
+    max_frame_distance = 70
+    init_views_params = InitViewsParameters(
+        inliers_prob=0.999,
+        outliers_ratio=0.5,
+        max_distance_to_epipolar_line=1,
+        triangulate_params=triangulate_params,
+        max_frame_distance=70,
+        max_reprojection_error=max_reprojection_error,
+        min_inlier_count=5,
+        min_inlier_ratio=0.3,
+    )
+
+    if known_view_1 is None or known_view_2 is None:
+        known_view_1, known_view_2 = init_views(
+            intrinsic_mat, corner_storage,
+            init_views_params
+        )
+
+    calculated_frames = 2
 
     frame1 = known_view_1[0]
     frame2 = known_view_2[0]
@@ -144,8 +274,9 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     update_range(frame1)
     update_range(frame2)
     print('Initialize:')
+    print(f'\tFrames: {frame1}, {frame2}')
 
-    while True:
+    while calculated_frames < frame_count:
         # triangulation
         if frame2 is None:
             best_points3d, best_corr_ids, best_med_cos = None, None, None
@@ -179,19 +310,29 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         best_frame_view_mat = None
         best_frame_outlier_ids = None
         best_frame_inliers_count = 0
-        for i in count_range:
-            if view_mats[i] is not None:
-                continue
-            view_mat, outlier_ids, inliers_count = _find_view_mat_pnp(
-                point_cloud_builder, corner_storage[i],
-                intrinsic_mat, pnp_params
+        for _ in range(2):
+            for i in count_range:
+                if view_mats[i] is not None:
+                    continue
+                view_mat, outlier_ids, inliers_count = _find_view_mat_pnp(
+                    point_cloud_builder, corner_storage[i],
+                    intrinsic_mat, pnp_params
+                )
+                if view_mat is not None:
+                    if best_frame == -1 or best_frame_inliers_count < inliers_count:
+                        best_frame = i
+                        best_frame_inliers_count = inliers_count
+                        best_frame_view_mat = view_mat
+                        best_frame_outlier_ids = outlier_ids
+            if best_frame != -1:
+                break
+            pnp_params = PnPParameters(
+                inliers_prob=pnp_params.inliers_prob,
+                outliers_ratio=pnp_params.outliers_ratio,
+                max_reprojection_error=pnp_params.max_reprojection_error,
+                min_inlier_count=0,
+                min_inlier_ratio=0.0,
             )
-            if view_mat is not None:
-                if best_frame == -1 or best_frame_inliers_count < inliers_count:
-                    best_frame = i
-                    best_frame_inliers_count = inliers_count
-                    best_frame_view_mat = view_mat
-                    best_frame_outlier_ids = outlier_ids
         if best_frame == -1:
             break
         view_mats[best_frame] = best_frame_view_mat
@@ -199,8 +340,13 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         update_range(best_frame)
         frame1 = best_frame
         frame2 = None
+        calculated_frames += 1
         print(f'Frame {frame1}:')
         print(f'\tInliers: {best_frame_inliers_count}')
+
+    none_views = [i for i, val in enumerate(view_mats) if val is None]
+    if len(none_views) > 0:
+        raise RuntimeError(f"{len(none_views)} views can't be calculated.")
 
     calc_point_cloud_colors(
         point_cloud_builder,
@@ -208,7 +354,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
         view_mats,
         intrinsic_mat,
         corner_storage,
-        triangulate_params.max_reprojection_error
+        max_reprojection_error
     )
     point_cloud = point_cloud_builder.build_point_cloud()
     poses = list(map(view_mat3x4_to_pose, view_mats))
