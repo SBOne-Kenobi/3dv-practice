@@ -26,7 +26,8 @@ from _camtrack import (
     check_inliers_mask,
     check_baseline,
     Correspondences,
-    eye3x4
+    eye3x4,
+    triangulate_ransac
 )
 from corners import CornerStorage, FrameCorners
 from data3d import CameraParameters, PointCloud, Pose
@@ -257,6 +258,8 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
     view_mats[frame1] = view_mat1
     view_mats[frame2] = view_mat2
 
+    all_view_mats = [(frame2, view_mats[frame2])]
+
     outlier_ids = None
 
     count_range = set()
@@ -278,29 +281,35 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
 
     while calculated_frames < frame_count:
         # triangulation
-        if frame2 is None:
-            best_points3d, best_corr_ids, best_med_cos = None, None, None
-            for i in get_range(frame1):
-                if i == frame1 or view_mats[i] is None:
-                    continue
-                if not check_baseline(view_mats[frame1], view_mats[i], base_line_min_dist):
-                    continue
-                corr = build_correspondences(corner_storage[frame1], corner_storage[i], outlier_ids)
-                points3d, corr_ids, med_cos = triangulate_correspondences(
-                    corr, view_mats[frame1], view_mats[i],
-                    intrinsic_mat, triangulate_params
-                )
-                if frame2 is None or best_med_cos > med_cos:
-                    frame2 = i
-                    best_points3d = points3d
-                    best_corr_ids = corr_ids
-                    best_med_cos = med_cos
-        else:
-            corr = build_correspondences(corner_storage[frame1], corner_storage[frame2], outlier_ids)
-            best_points3d, best_corr_ids, best_med_cos = triangulate_correspondences(
-                corr, view_mats[frame1], view_mats[frame2],
-                intrinsic_mat, triangulate_params
-            )
+        # if frame2 is None:
+        #     best_points3d, best_corr_ids, best_med_cos = None, None, None
+        #     for i in get_range(frame1):
+        #         if i == frame1 or view_mats[i] is None:
+        #             continue
+        #         if not check_baseline(view_mats[frame1], view_mats[i], base_line_min_dist):
+        #             continue
+        #         corr = build_correspondences(corner_storage[frame1], corner_storage[i], outlier_ids)
+        #         points3d, corr_ids, med_cos = triangulate_correspondences(
+        #             corr, view_mats[frame1], view_mats[i],
+        #             intrinsic_mat, triangulate_params
+        #         )
+        #         if frame2 is None or best_med_cos > med_cos:
+        #             frame2 = i
+        #             best_points3d = points3d
+        #             best_corr_ids = corr_ids
+        #             best_med_cos = med_cos
+        # else:
+        #     corr = build_correspondences(corner_storage[frame1], corner_storage[frame2], outlier_ids)
+        #     best_points3d, best_corr_ids, best_med_cos = triangulate_correspondences(
+        #         corr, view_mats[frame1], view_mats[frame2],
+        #         intrinsic_mat, triangulate_params
+        #     )
+        best_points3d, best_corr_ids, best_med_cos = triangulate_ransac(
+            corner_storage, (frame1, view_mats[frame1]), all_view_mats,
+            intrinsic_mat, triangulate_params,
+            0.999, 0.5, 5, 0.3, outlier_ids
+        )
+        all_view_mats.append((frame1, view_mats[frame1]))
         point_cloud_builder.add_points(best_corr_ids, best_points3d)
         print(f'\tTriangulated {len(best_points3d)} points')
         print(f'\tCloud size: {len(point_cloud_builder.ids)}')
@@ -325,6 +334,8 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                         best_frame_view_mat = view_mat
                         best_frame_outlier_ids = outlier_ids
             if best_frame != -1:
+                break
+            if pnp_params.min_inlier_ratio == 0.0:
                 break
             pnp_params = PnPParameters(
                 inliers_prob=pnp_params.inliers_prob,

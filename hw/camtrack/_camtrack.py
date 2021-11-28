@@ -17,11 +17,12 @@ __all__ = [
     'to_camera_center',
     'to_opencv_camera_mat3x3',
     'triangulate_correspondences',
-    'view_mat3x4_to_pose'
+    'view_mat3x4_to_pose',
+    'triangulate_ransac',
 ]
 
 from collections import namedtuple
-from typing import List, Tuple
+from typing import List, Tuple, Iterable
 
 import click
 import cv2
@@ -178,6 +179,46 @@ def _calc_reprojection_error_mask(points3d, points2d_1, points2d_2,
         reproj_errs2.flatten() < max_reprojection_error
     )
     return reproj_err_mask
+
+
+def triangulate_ransac(corner_storage: CornerStorage,
+                       target_view: Tuple[int, np.ndarray],
+                       view_mats: Iterable[Tuple[int, np.ndarray]],
+                       intrinsic_mat: np.ndarray,
+                       parameters: TriangulationParameters,
+                       inliers_prob: float,
+                       outliers_ratio: float,
+                       min_inliers_count: int,
+                       min_inliers_ratio: float,
+                       ids_to_remove=None) \
+        -> Tuple[np.ndarray, np.ndarray, float]:
+    iters = int(np.ceil(np.log(1.0 - inliers_prob) / np.log(1.0 - (1.0 - outliers_ratio) ** 2)))
+    best_points3d = None
+    best_corr_ids = None
+    best_cos_med = None
+    best_inliers_count = None
+    for _ in range(iters):
+        pair_view_mat = view_mats[np.random.randint(0, len(view_mats))]
+        corrs = build_correspondences(corner_storage[target_view[0]], corner_storage[pair_view_mat[0]], ids_to_remove)
+        points3d, corr_ids, cos_med = triangulate_correspondences(
+            corrs, target_view[1], pair_view_mat[1], intrinsic_mat, parameters
+        )
+        inliers_count = 0
+        for i, view_mat in view_mats:
+            ids = corner_storage[i].ids.flatten()
+            _, (indices_1, indices_2) = snp.intersect(corr_ids, ids, indices=True)
+            if len(indices_1) == 0:
+                continue
+            reproj_errs = compute_reprojection_errors(points3d[indices_1], corner_storage[i].points[indices_2], intrinsic_mat @ view_mat)
+            inliers = reproj_errs.flatten() < parameters.max_reprojection_error
+            if check_inliers_mask(inliers, min_inliers_count, min_inliers_ratio):
+                inliers_count += 1
+        if best_inliers_count is None or best_inliers_count < inliers_count:
+            best_points3d = points3d
+            best_corr_ids = corr_ids
+            best_cos_med = cos_med
+            best_inliers_count = inliers_count
+    return best_points3d, best_corr_ids, best_cos_med
 
 
 def triangulate_correspondences(correspondences: Correspondences,
